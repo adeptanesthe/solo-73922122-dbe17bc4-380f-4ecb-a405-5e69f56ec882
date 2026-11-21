@@ -1,0 +1,9 @@
+name: gp-sampler
+
+services:
+  web:
+    build: .
+    image: gp-sampler:latest
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

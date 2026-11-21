@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>高温炉温度采样选点 · GP 后验不确定性下降</title>
+<style>
+  :root { --blue:#1f6feb; --green:#1a7f37; --red:#cf222e; --gray:#57606a; --border:#d0d7de; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:#f6f8fa; color:#1f2328; }
+  header { background:#0a3069; color:#fff; padding:18px 28px; }
+  header h1 { margin:0 0 4px; font-size:20px; }
+  header p { margin:0; font-size:13px; opacity:.85; }
+  main { max-width:1080px; margin:20px auto 60px; padding:0 16px; }
+  .card { background:#fff; border:1px solid var(--border); border-radius:8px;
+          padding:18px 20px; margin-bottom:18px; }
+  h2 { font-size:16px; margin:4px 0 14px; }
+  h3 { font-size:14px; margin:18px 0 8px; color:var(--gray); }
+  label { display:block; font-size:13px; color:var(--gray); margin-bottom:4px; }
+  textarea { width:100%; font-family:ui-monospace,Consolas,monospace; font-size:12.5px;
+             border:1px solid var(--border); border-radius:6px; padding:8px; resize:vertical; }
+  input[type=number], input[type=text] { width:100%; padding:7px 8px; font-size:13px;
+             border:1px solid var(--border); border-radius:6px; }
+  input[type=file] { font-size:12px; margin:4px 0 10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+  .actions { margin-top:16px; display:flex; gap:10px; flex-wrap:wrap; }
+  button { padding:8px 18px; font-size:14px; border:1px solid var(--border); border-radius:6px;
+           background:#fff; cursor:pointer; }
+  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:600; }
+  button:hover { filter:brightness(.95); }
+  .hint { font-size:12px; color:var(--gray); margin-top:6px; }
+  .error { margin-top:14px; padding:12px 14px; border:1px solid #f3c2c6; background:#ffebe9;
+           color:var(--red); border-radius:6px; font-size:13px; white-space:pre-wrap; }
+  .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:8px; }
+  .metric { border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  .metric .k { font-size:12px; color:var(--gray); }
+  .metric .v { font-size:18px; font-weight:600; margin-top:2px; }
+  .metric .v.sel { color:var(--green); }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th, td { border:1px solid var(--border); padding:5px 8px; text-align:right; }
+  th { background:#f6f8fa; }
+  td.l, th.l { text-align:left; }
+  tr.selected { background:#dafbe1; font-weight:600; }
+  tr.excluded { color:#8c959f; }
+  svg { width:100%; height:auto; border:1px solid var(--border); border-radius:6px; background:#fff; }
+  .legend { font-size:12px; color:var(--gray); margin:4px 0 0; }
+  .legend span { display:inline-block; margin-right:14px; }
+  .sw { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
+  code { background:#eff1f3; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>高温炉温度采样选点</h1>
+  <p>高斯过程（平方指数核）后验协方差 · 枚举全部合法候选点对 · 选择总方差下降最大的 2 个新增采样点</p>
+</header>
+<main>
+  <section class="card">
+    <h2>1. 输入数据</h2>
+    <div class="grid">
+      <div>
+        <label for="measured-times">已测时刻（逗号 / 空格 / 换行分隔）</label>
+        <textarea id="measured-times" rows="5" placeholder="0, 1, 2, 3, 5, 8, 13"></textarea>
+      </div>
+      <div>
+        <label for="measured-values">已测温度（与时刻一一对应）</label>
+        <textarea id="measured-values" rows="5" placeholder="25.3, 196.1, 330.8, ..."></textarea>
+      </div>
+      <div>
+        <label for="candidate-times">候选采样时刻</label>
+        <textarea id="candidate-times" rows="5" placeholder="0.5, 1.5, 2.5, ..."></textarea>
+      </div>
+      <div>
+        <label>CSV 导入（可选，导入后覆盖上方文本框）</label>
+        <input type="file" id="measured-file" accept=".csv,.txt">
+        <div class="hint">已测数据 CSV：每行 <code>时刻,温度</code></div>
+        <input type="file" id="candidate-file" accept=".csv,.txt">
+        <div class="hint">候选时刻 CSV：每行一个时刻</div>
+      </div>
+    </div>
+
+    <h2 style="margin-top:18px">2. 模型参数</h2>
+    <div class="grid">
+      <div><label for="length-scale">核长度尺度 ℓ（&gt; 0）</label>
+        <input type="number" id="length-scale" step="any" value="2"></div>
+      <div><label for="noise-std">观测噪声 σₙ（≥ 0，标准差）</label>
+        <input type="number" id="noise-std" step="any" value="5"></div>
+      <div><label for="signal-variance">核信号方差（&gt; 0，温度² 量级）</label>
+        <input type="number" id="signal-variance" step="any" value="100000"></div>
+      <div><label for="min-interval">最小时间间隔（≥ 0）</label>
+        <input type="number" id="min-interval" step="any" value="1"></div>
+      <div><label>新增采样点数</label>
+        <input type="text" value="2（固定）" disabled></div>
+    </div>
+
+    <div class="actions">
+      <button id="fill-demo" type="button">载入示例数据</button>
+      <button id="run" class="primary" type="button">计算选点</button>
+    </div>
+    <div id="error" class="error" hidden></div>
+  </section>
+
+  <section class="card" id="result-card" hidden>
+    <h2>3. 选点结果</h2>
+    <div class="summary" id="summary"></div>
+
+    <h3>后验均值 ± 2σ（选点前）与选中采样点</h3>
+    <svg id="chart-mean" viewBox="0 0 720 280" role="img"></svg>
+    <div class="legend">
+      <span><span class="sw" style="background:#1f6feb"></span>后验均值</span>
+      <span><span class="sw" style="background:#bfdbfe"></span>±2σ 置信带</span>
+      <span><span class="sw" style="background:#cf222e"></span>已测点</span>
+      <span><span class="sw" style="background:#1a7f37"></span>选中的新采样点</span>
+    </div>
+
+    <h3>候选时刻方差：选点前 vs 选点后</h3>
+    <svg id="chart-var" viewBox="0 0 720 280" role="img"></svg>
+    <div class="legend">
+      <span><span class="sw" style="background:#1f6feb"></span>选前方差</span>
+      <span><span class="sw" style="background:#1a7f37"></span>选后方差</span>
+    </div>
+
+    <h3>候选点明细</h3>
+    <table>
+      <thead><tr>
+        <th class="l">#</th><th>时刻</th><th class="l">状态</th>
+        <th>选前方差</th><th>选后方差</th><th>后验均值</th>
+      </tr></thead>
+      <tbody id="cand-tbody"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+const DEMO = {
+  measured_times:  [0, 1, 2, 3, 5, 8, 13],
+  measured_values: [25.3, 196.1, 330.8, 433.5, 578.2, 695.1, 769.9],
+  candidate_times: [0.5, 1.5, 2.5, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5,
+                    8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 14, 14.5, 15, 15.5],
+};
+
+function fmt(v) {
+  if (!Number.isFinite(v)) return String(v);
+  const a = Math.abs(v);
+  if (a !== 0 && (a >= 1e5 || a < 1e-3)) return v.toExponential(3);
+  return Number(v.toPrecision(5)).toString();
+}
+
+function parseNumList(text, name) {
+  const tokens = text.trim().split(/[\s,;，、]+/).filter(Boolean);
+  const vals = tokens.map(t => {
+    const v = Number(t);
+    if (!Number.isFinite(v)) throw new Error(`${name} 中含有无法解析的值：“${t}”`);
+    return v;
+  });
+  return vals;
+}
+
+function showError(msg) {
+  const el = $("error");
+  el.textContent = msg;
+  el.hidden = false;
+  $("result-card").hidden = true;   // 整批拒绝：清空旧结果，不给部分建议
+}
+function clearError() { $("error").hidden = true; }
+
+function readFileInto(input, apply) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => apply(String(reader.result));
+  reader.readAsText(f);
+}
+
+$("measured-file").addEventListener("change", e => {
+  readFileInto(e.target, text => {
+    const times = [], values = [];
+    const lines = text.split(/\r?\n/);
+    for (let ln = 0; ln < lines.length; ln++) {
+      const parts = lines[ln].trim().split(/[\s,;，]+/).filter(Boolean);
+      if (!parts.length) continue;
+      const t = Number(parts[0]), v = Number(parts[1]);
+      if (parts.length < 2 || !Number.isFinite(t) || !Number.isFinite(v)) {
+        showError(`已测 CSV 第 ${ln + 1} 行无法解析（应为：时刻,温度）：${lines[ln]}`);
+        return;
+      }
+      times.push(t); values.push(v);
+    }
+    if (!times.length) { showError("已测 CSV 中没有有效数据行"); return; }
+    $("measured-times").value = times.join(", ");
+    $("measured-values").value = values.join(", ");
+    clearError();
+  });
+});
+
+$("candidate-file").addEventListener("change", e => {
+  readFileInto(e.target, text => {
+    try {
+      const vals = parseNumList(text.replace(/\r?\n/g, " "), "候选时刻");
+      if (!vals.length) { showError("候选 CSV 中没有有效数值"); return; }
+      $("candidate-times").value = vals.join(", ");
+      clearError();
+    } catch (err) { showError(err.message); }
+  });
+});
+
+$("fill-demo").addEventListener("click", () => {
+  $("measured-times").value = DEMO.measured_times.join(", ");
+  $("measured-values").value = DEMO.measured_values.join(", ");
+  $("candidate-times").value = DEMO.candidate_times.join(", ");
+  $("length-scale").value = 2;
+  $("noise-std").value = 5;
+  $("signal-variance").value = 100000;
+  $("min-interval").value = 1;
+  clearError();
+});
+
+function collectPayload() {
+  const measured_times = parseNumList($("measured-times").value, "已测时刻");
+  const measured_values = parseNumList($("measured-values").value, "已测温度");
+  const candidate_times = parseNumList($("candidate-times").value, "候选时刻");
+  if (measured_times.length !== measured_values.length)
+    throw new Error(`已测时刻（${measured_times.length} 个）与已测温度（${measured_values.length} 个）数量不一致`);
+  if (candidate_times.length < 2) throw new Error("候选时刻至少需要 2 个");
+  const num = id => {
+    const v = Number($(id).value);
+    if (!Number.isFinite(v)) throw new Error(`参数 ${$(id).previousElementSibling?.textContent || id} 不是有限数值`);
+    return v;
+  };
+  const payload = {
+    measured_times, measured_values, candidate_times,
+    length_scale: num("length-scale"),
+    noise_std: num("noise-std"),
+    signal_variance: num("signal-variance"),
+    min_interval: num("min-interval"),
+  };
+  if (payload.length_scale <= 0) throw new Error("核长度尺度必须 > 0");
+  if (payload.noise_std < 0) throw new Error("观测噪声必须 ≥ 0");
+  if (payload.signal_variance <= 0) throw new Error("核信号方差必须 > 0");
+  if (payload.min_interval < 0) throw new Error("最小时间间隔必须 ≥ 0");
+  return payload;
+}
+
+$("run").addEventListener("click", async () => {
+  clearError();
+  let payload;
+  try { payload = collectPayload(); }
+  catch (err) { showError(err.message); return; }
+  $("run").disabled = true;
+  try {
+    const resp = await fetch("/api/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      const d = data && data.detail;
+      if (d && typeof d === "object") {
+        let msg = `【${d.code || "ERROR"}】${d.message || "请求被拒绝"}`;
+        if (Array.isArray(d.errors)) msg += "\n" + d.errors.map(e => `· ${e.loc.join(".")}: ${e.msg}`).join("\n");
+        showError(msg);
+      } else showError(typeof d === "string" ? d : `请求失败（HTTP ${resp.status}）`);
+      return;
+    }
+    render(payload, data);
+  } catch (err) {
+    showError(`网络或服务错误：${err.message}`);
+  } finally {
+    $("run").disabled = false;
+  }
+});
+
+/* ---------- 结果渲染 ---------- */
+
+function render(payload, res) {
+  $("result-card").hidden = false;
+  const pct = res.total_variance_before > 0
+    ? (100 * res.total_reduction / res.total_variance_before).toFixed(1) + "%" : "—";
+  $("summary").innerHTML = "";
+  const metrics = [
+    ["选中的新采样时刻", res.selected_times.map(t => fmt(t)).join(" 与 "), true],
+    ["选前总方差", fmt(res.total_variance_before)],
+    ["选后总方差", fmt(res.total_variance_after)],
+    ["总方差下降", fmt(res.total_reduction) + `（${pct}）`],
+    ["合法点对 / 全部点对", `${res.n_pairs_feasible} / ${res.n_pairs_total}`],
+  ];
+  for (const [k, v, sel] of metrics) {
+    const div = document.createElement("div");
+    div.className = "metric";
+    div.innerHTML = `<div class="k">${k}</div><div class="v${sel ? " sel" : ""}">${v}</div>`;
+    $("summary").appendChild(div);
+  }
+
+  const order = res.candidates.map((c, i) => i).sort((a, b) => res.candidates[a].time - res.candidates[b].time);
+  const xs = order.map(i => res.candidates[i].time);
+  const mean = order.map(i => res.candidates[i].posterior_mean);
+  const sd = order.map(i => 2 * Math.sqrt(res.candidates[i].variance_before));
+  const vBefore = order.map(i => res.candidates[i].variance_before);
+  const vAfter = order.map(i => res.candidates[i].variance_after);
+
+  drawChart($("chart-mean"), [
+    { type: "band", x: xs, y0: mean.map((m, k) => m - sd[k]), y1: mean.map((m, k) => m + sd[k]), color: "#bfdbfe" },
+    { type: "line", x: xs, y: mean, color: "#1f6feb", width: 2 },
+    { type: "points", x: payload.measured_times, y: payload.measured_values, color: "#cf222e", r: 4 },
+    { type: "vlines", x: res.selected_times, color: "#1a7f37", dash: "6 4" },
+    { type: "points", x: res.selected_times,
+      y: res.selected_times.map(t => {
+        const k = res.candidates.findIndex(c => c.time === t);
+        return k >= 0 ? res.candidates[k].posterior_mean : 0;
+      }), color: "#1a7f37", r: 5 },
+  ], { xLabel: "时刻", yLabel: "温度" });
+
+  drawChart($("chart-var"), [
+    { type: "line", x: xs, y: vBefore, color: "#1f6feb", width: 2 },
+    { type: "line", x: xs, y: vAfter, color: "#1a7f37", width: 2 },
+    { type: "vlines", x: res.selected_times, color: "#1a7f37", dash: "6 4" },
+  ], { xLabel: "时刻", yLabel: "方差" });
+
+  const tbody = $("cand-tbody");
+  tbody.innerHTML = "";
+  for (const c of res.candidates) {
+    const tr = document.createElement("tr");
+    if (c.selected) tr.className = "selected";
+    else if (!c.eligible) tr.className = "excluded";
+    const status = c.selected ? "✔ 选中" : (c.eligible ? "可选" : `排除：${c.exclusion_reason}`);
+    tr.innerHTML = `<td class="l">${c.index}</td><td>${fmt(c.time)}</td><td class="l">${status}</td>` +
+      `<td>${fmt(c.variance_before)}</td><td>${fmt(c.variance_after)}</td><td>${fmt(c.posterior_mean)}</td>`;
+    tbody.appendChild(tr);
+  }
+  $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---------- 简易 SVG 图表 ---------- */
+
+function drawChart(svg, series, { xLabel, yLabel }) {
+  const W = 720, H = 280, P = { l: 64, r: 16, t: 14, b: 36 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  const eat = (x, y) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    xMin = Math.min(xMin, x); xMax = Math.max(xMax, x);
+    yMin = Math.min(yMin, y); yMax = Math.max(yMax, y);
+  };
+  for (const s of series) {
+    if (s.type === "band") s.x.forEach((x, k) => { eat(x, s.y0[k]); eat(x, s.y1[k]); });
+    else if (s.type === "vlines") s.x.forEach(x => eat(x, NaN));
+    else s.x.forEach((x, k) => eat(x, s.y[k]));
+  }
+  if (!Number.isFinite(xMin)) { xMin = 0; xMax = 1; yMin = 0; yMax = 1; }
+  if (xMax === xMin) { xMax += 1; xMin -= 1; }
+  if (yMax === yMin) { yMax += 1; yMin -= 1; }
+  const yPad = 0.06 * (yMax - yMin); yMin -= yPad; yMax += yPad;
+  const X = v => P.l + (v - xMin) / (xMax - xMin) * iw;
+  const Y = v => P.t + ih - (v - yMin) / (yMax - yMin) * ih;
+
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  svg.innerHTML = "";
+
+  // 坐标轴与刻度
+  for (let k = 0; k <= 5; k++) {
+    const xv = xMin + (xMax - xMin) * k / 5, yv = yMin + (yMax - yMin) * k / 5;
+    svg.appendChild(el("line", { x1: X(xv), y1: P.t, x2: X(xv), y2: P.t + ih, stroke: "#eaeef2" }));
+    svg.appendChild(el("line", { x1: P.l, y1: Y(yv), x2: P.l + iw, y2: Y(yv), stroke: "#eaeef2" }));
+    svg.appendChild(el("text", { x: X(xv), y: P.t + ih + 16, "font-size": 10, "text-anchor": "middle", fill: "#57606a" }, fmt(xv)));
+    svg.appendChild(el("text", { x: P.l - 6, y: Y(yv) + 3, "font-size": 10, "text-anchor": "end", fill: "#57606a" }, fmt(yv)));
+  }
+  svg.appendChild(el("rect", { x: P.l, y: P.t, width: iw, height: ih, fill: "none", stroke: "#d0d7de" }));
+  svg.appendChild(el("text", { x: P.l + iw / 2, y: H - 6, "font-size": 11, "text-anchor": "middle", fill: "#57606a" }, xLabel));
+  svg.appendChild(el("text", { x: 12, y: P.t + ih / 2, "font-size": 11, "text-anchor": "middle",
+    transform: `rotate(-90 12 ${P.t + ih / 2})`, fill: "#57606a" }, yLabel));
+
+  for (const s of series) {
+    if (s.type === "band") {
+      const up = s.x.map((x, k) => `${X(x)},${Y(s.y1[k])}`).join(" ");
+      const dn = s.x.map((x, k) => `${X(x)},${Y(s.y0[k])}`).reverse().join(" ");
+      svg.appendChild(el("polygon", { points: up + " " + dn, fill: s.color, "fill-opacity": .5, stroke: "none" }));
+    } else if (s.type === "line") {
+      const pts = s.x.map((x, k) => `${X(x)},${Y(s.y[k])}`).join(" ");
+      svg.appendChild(el("polyline", { points: pts, fill: "none", stroke: s.color, "stroke-width": s.width || 1.5 }));
+    } else if (s.type === "points") {
+      s.x.forEach((x, k) => {
+        if (!Number.isFinite(s.y[k])) return;
+        svg.appendChild(el("circle", { cx: X(x), cy: Y(s.y[k]), r: s.r || 3, fill: s.color }));
+      });
+    } else if (s.type === "vlines") {
+      s.x.forEach(x => svg.appendChild(el("line", {
+        x1: X(x), y1: P.t, x2: X(x), y2: P.t + ih,
+        stroke: s.color, "stroke-width": 1.5, "stroke-dasharray": s.dash || "none",
+      })));
+    }
+  }
+}
+</script>
+</body>
+</html>
