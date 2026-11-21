@@ -52,7 +52,8 @@ def select(req: SelectRequest) -> dict:
     """计算最优新增采样点对，返回选点前后每个候选时刻的方差。
 
     失败时返回 422，detail.code 取值：
-    NON_FINITE_INPUT / KERNEL_NOT_PSD / NO_FEASIBLE_COMBINATION / INVALID_INPUT。
+    NON_FINITE_INPUT / KERNEL_NOT_PSD / NO_FEASIBLE_COMBINATION /
+    NUMERICAL_INSTABILITY / INVALID_INPUT。
     """
     try:
         res = select_pair(

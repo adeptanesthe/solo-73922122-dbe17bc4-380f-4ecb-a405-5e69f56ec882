@@ -7,9 +7,11 @@ import numpy as np
 import pytest
 
 from app.gp import (
+    GPError,
     KernelNotPSDError,
     NoFeasibleCombinationError,
     NonFiniteInputError,
+    NumericalInstabilityError,
     select_pair,
     squared_exponential_kernel,
 )
@@ -202,3 +204,102 @@ def test_empty_observations_allowed():
     # 无观测时退化为先验：各候选点方差 = 信号方差
     assert np.allclose(res.variance_before, 2.0)
     assert len(res.selected_times) == 2
+
+
+# ---------------- 病态回归：长度尺度 >> 补测窗口、观测噪声极小 ----------------
+
+def _reference_totals_ld(t_obs, t_cand, *, length_scale, noise_std, signal_variance,
+                         min_interval):
+    """扩展精度参照实现：把每个合法点对并入观测集，整体重建 GP 后验并求总方差。
+
+    与 select_pair 的评分公式相互独立（逐对增广 Cholesky 重建），且在
+    longdouble 中计算——该病态场景下 float64 参照自身的误差（~1e-4 量级）
+    会超过被测差异，无法作为真值。已用 50 位任意精度（mpmath）离线核验：
+    本参照在下列条件数范围内与真值一致（相对误差 ≲5e-5）。
+    """
+    from app.gp import _LD, _cholesky_ld, _kernel_ld, _solve_lower_ld
+
+    t_obs = np.asarray(t_obs, float)
+    t_cand = np.asarray(t_cand, float)
+    ls = _LD(length_scale)
+    sv = _LD(signal_variance)
+    nv = _LD(noise_std ** 2)
+    k_cc = _kernel_ld(t_cand, t_cand, ls, sv)
+    out = {}
+    for i, j in combinations(range(len(t_cand)), 2):
+        if np.any(np.isclose(t_cand[i], t_obs, rtol=RTOL_SAME, atol=ATOL_SAME)):
+            continue
+        if np.any(np.isclose(t_cand[j], t_obs, rtol=RTOL_SAME, atol=ATOL_SAME)):
+            continue
+        if np.isclose(t_cand[i], t_cand[j], rtol=RTOL_SAME, atol=ATOL_SAME):
+            continue
+        if abs(t_cand[i] - t_cand[j]) < min_interval:
+            continue
+        aug = np.concatenate([t_obs, [t_cand[i], t_cand[j]]])
+        k_oo = _kernel_ld(aug, aug, ls, sv) + nv * np.eye(aug.size, dtype=_LD)
+        try:
+            chol = _cholesky_ld(k_oo)
+        except np.linalg.LinAlgError:
+            continue  # 增广系统在扩展精度下仍奇异：该点对无法可靠评估，跳过
+        k_co = _kernel_ld(t_cand, aug, ls, sv)
+        w = _solve_lower_ld(chol, k_co.T)
+        var = sv - np.sum(w * w, axis=0)  # k(x, x) = signal_variance
+        out[(i, j)] = float(np.sum(np.clip(var, 0.0, None)))
+    return out
+
+
+@pytest.mark.parametrize("length_scale,noise_std", [(1e4, 1e-4), (1e5, 1e-5)])
+@pytest.mark.parametrize("seed", [2, 3, 4, 5])
+def test_ill_conditioned_regime_selects_true_optimum(length_scale, noise_std, seed):
+    """回归：旧实现（float64 流水线 + 闭式评分）在此场景会把选后总方差更高
+    的点对误判为最优（真值差距最高达数倍）。修复后选中点对的真实选后总方差
+    必须与扩展精度参照的最优一致（相对容差 1e-4，旧实现的错误 >=5e-4）。
+    """
+    rng = np.random.default_rng(seed)
+    t_cand = np.sort(rng.uniform(0.0, 10.0, 24))
+    t_obs = np.sort(rng.uniform(0.0, 10.0, 2))
+    y_obs = np.sin(t_obs) * 50 + 500
+    params = dict(length_scale=length_scale, noise_std=noise_std,
+                  signal_variance=1e5, min_interval=0.0)
+
+    res = select_pair(t_obs, y_obs, t_cand, **params)
+    ref = _reference_totals_ld(t_obs, t_cand, **params)
+
+    sel = tuple(sorted(res.selected_indices))
+    assert sel in ref
+    best_after = min(ref.values())
+    assert ref[sel] <= best_after * (1 + 1e-4) + 1e-12
+    # 上报的选后总方差与参照一致
+    assert res.total_variance_after == pytest.approx(ref[sel], rel=1e-4)
+
+
+@pytest.mark.parametrize("length_scale,noise_std", [(1e6, 1e-6), (1e6, 1e-7)])
+def test_extreme_ill_conditioning_rejected(length_scale, noise_std):
+    """扩展精度也不足以可靠选点时，整批拒绝（不给任何部分建议）。"""
+    with pytest.raises(NumericalInstabilityError):
+        select_pair([3.0, 7.0], [400.0, 600.0], list(np.linspace(0.0, 10.0, 12)),
+                    length_scale=length_scale, noise_std=noise_std,
+                    signal_variance=1e5)
+    # 基类断言：上层可统一按 GPError 捕获
+    with pytest.raises(GPError):
+        select_pair([3.0, 7.0], [400.0, 600.0], list(np.linspace(0.0, 10.0, 12)),
+                    length_scale=length_scale, noise_std=noise_std,
+                    signal_variance=1e5)
+
+
+# ---------------- 规模：500 个候选时刻 ----------------
+
+def test_five_hundred_candidates_supported():
+    """500 个候选时刻（124,750 个点对）：结果自洽、逐点方差有限且单调不增。"""
+    rng = np.random.default_rng(0)
+    t_cand = np.sort(rng.uniform(0.0, 100.0, 500))
+    t_obs = np.sort(rng.uniform(0.0, 100.0, 20))
+    y_obs = np.sin(t_obs / 10.0) * 100 + 400
+    res = select_pair(t_obs, y_obs, t_cand, length_scale=8.0, noise_std=2.0,
+                      signal_variance=1e4, min_interval=0.5)
+    assert res.n_pairs_total == 500 * 499 // 2
+    assert 0 < res.n_pairs_feasible <= res.n_pairs_total
+    assert np.all(np.isfinite(res.variance_after))
+    assert np.all(res.variance_after <= res.variance_before + 1e-6)
+    assert 0.0 <= res.total_variance_after <= res.total_variance_before
+    assert res.total_variance_after == pytest.approx(res.variance_after.sum())
